@@ -1,0 +1,76 @@
+---
+- name: Linux User Audit - CSV Export with Password Expiry
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    csv_file: "/tmp/linux_user_audit.csv"
+
+  tasks:
+
+    - name: Get all local users (UID >= 1000)
+      shell: |
+        getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" {print $1 ":" $3 ":" $7}'
+      register: local_users
+      changed_when: false
+
+    - name: Create CSV header (run once)
+      delegate_to: localhost
+      run_once: true
+      copy:
+        dest: "{{ csv_file }}"
+        content: >
+          Hostname,Username,UID,Locked,Last_Password_Change,
+          Password_Expires_In_Days,Last_Login,Shell
+          \n
+
+    - name: Collect user audit details
+      shell: |
+        USER={{ item.split(':')[0] }}
+        UID={{ item.split(':')[1] }}
+        SHELL={{ item.split(':')[2] }}
+
+        # Locked status
+        LOCKED=$(passwd -S $USER | awk '{print $2}')
+        LOCKED_STATUS=$( [ "$LOCKED" = "LK" ] && echo "Yes" || echo "No" )
+
+        # Last password change
+        LAST_PWD=$(chage -l $USER | grep "Last password change" | cut -d: -f2 | xargs)
+
+        # Password expiry in days
+        EXPIRE_LINE=$(chage -l $USER | grep "Password expires")
+        EXPIRE_DATE=$(echo "$EXPIRE_LINE" | cut -d: -f2 | xargs)
+
+        if [[ "$EXPIRE_DATE" == "never" ]]; then
+          EXPIRE_DAYS="Never"
+        else
+          TODAY=$(date +%s)
+          EXPIRE_SEC=$(date -d "$EXPIRE_DATE" +%s 2>/dev/null)
+          if [[ -z "$EXPIRE_SEC" ]]; then
+            EXPIRE_DAYS="Unknown"
+          else
+            DAYS_LEFT=$(( (EXPIRE_SEC - TODAY) / 86400 ))
+            if [[ "$DAYS_LEFT" -lt 0 ]]; then
+              EXPIRE_DAYS="Expired"
+            else
+              EXPIRE_DAYS="$DAYS_LEFT"
+            fi
+          fi
+        fi
+
+        # Last login
+        LAST_LOGIN=$(lastlog -u $USER | awk 'NR==2 {print ($0 ~ /Never logged in/) ? "Never" : $4" "$5" "$6" "$7}')
+
+        echo "{{ inventory_hostname }},$USER,$UID,$LOCKED_STATUS,\"$LAST_PWD\",$EXPIRE_DAYS,\"$LAST_LOGIN\",$SHELL"
+      loop: "{{ local_users.stdout_lines }}"
+      register: audit_lines
+      changed_when: false
+
+    - name: Append audit data to CSV
+      delegate_to: localhost
+      lineinfile:
+        path: "{{ csv_file }}"
+        line: "{{ item.stdout }}"
+        insertafter: EOF
+      loop: "{{ audit_lines.results }}"
