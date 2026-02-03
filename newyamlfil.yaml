@@ -1,0 +1,59 @@
+---
+- name: Linux User Audit – Collect passwd details into CSV
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    csv_file: "./output/user_audit_{{ inventory_hostname }}.csv"
+
+  tasks:
+
+    - name: Get passwd entries
+      command: getent passwd
+      register: passwd_data
+
+    - name: Create CSV header on control node
+      delegate_to: localhost
+      copy:
+        dest: "{{ csv_file }}"
+        content: "Hostname,Username,UID,Group,AccountStatus,LastPasswordChange,PasswordExpiryDays,Shell\n"
+        force: yes
+
+    - name: Process each user
+      loop: "{{ passwd_data.stdout_lines }}"
+      vars:
+        username: "{{ item.split(':')[0] }}"
+        uid: "{{ item.split(':')[2] }}"
+        gid: "{{ item.split(':')[3] }}"
+        shell: "{{ item.split(':')[6] }}"
+      block:
+
+        - name: Get group name
+          command: getent group {{ gid }}
+          register: group_data
+          failed_when: false
+
+        - name: Get password aging details
+          command: chage -l {{ username }}
+          register: chage_data
+          failed_when: false
+
+        - name: Determine account lock status
+          command: passwd -S {{ username }}
+          register: passwd_status
+          failed_when: false
+
+        - name: Append user data to CSV
+          delegate_to: localhost
+          lineinfile:
+            path: "{{ csv_file }}"
+            line: >-
+              {{ inventory_hostname }},
+              {{ username }},
+              {{ uid }},
+              {{ (group_data.stdout.split(':')[0] if group_data.stdout else 'NA') }},
+              {{ 'Locked' if passwd_status.stdout.split()[1] == 'L' else 'Unlocked' }},
+              {{ (chage_data.stdout_lines | select('search','Last password change') | list | first | split(':')[-1] | trim) | default('NA') }},
+              {{ (chage_data.stdout_lines | select('search','Password expires') | list | first | split(':')[-1] | trim) | default('Never') }},
+              {{ shell }}
