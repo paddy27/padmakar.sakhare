@@ -1,0 +1,49 @@
+---
+- name: Chrony sync status audit
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    local_report_dir: "./chrony_out_of_sync"
+
+  tasks:
+
+    - name: Check if chronyc command exists
+      command: which chronyc
+      register: chronyc_check
+      ignore_errors: yes
+
+    - name: Run chronyc tracking
+      command: chronyc tracking
+      register: chronyc_tracking
+      when: chronyc_check.rc == 0
+      ignore_errors: yes
+
+    - name: Determine if system is out of sync
+      set_fact:
+        chrony_out_of_sync: true
+      when:
+        - chronyc_check.rc == 0
+        - chronyc_tracking.stdout is not search("Leap status.*Normal")
+
+    - name: Ensure local report directory exists
+      delegate_to: localhost
+      run_once: true
+      file:
+        path: "{{ local_report_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create out-of-sync report locally
+      delegate_to: localhost
+      when: chrony_out_of_sync | default(false)
+      copy:
+        dest: "{{ local_report_dir }}/{{ inventory_hostname }}.txt"
+        content: |
+          Hostname        : {{ inventory_hostname }}
+          Chronyc Present : YES
+          Status          : OUT OF SYNC
+
+          ---- chronyc tracking output ----
+          {{ chronyc_tracking.stdout }}
